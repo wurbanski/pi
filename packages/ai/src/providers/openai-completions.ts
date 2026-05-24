@@ -146,10 +146,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
+			// OpenCode Go's 429 responses carry ~25h retry-after headers (quota errors).
+			// Default maxRetries to 0 so the SDK doesn't burn exponential backoff on
+			// errors that won't resolve. Pi's own retry logic handles transient failures.
+			const effectiveMaxRetries =
+				model.provider === "opencode-go" ? (options?.maxRetries ?? 0) : options?.maxRetries;
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
+				...(effectiveMaxRetries !== undefined ? { maxRetries: effectiveMaxRetries } : {}),
 			};
 			const { data: openaiStream, response } = await client.chat.completions
 				.create(params, requestOptions)
@@ -412,6 +417,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			// Classify opencode-go quota errors as non-retryable so the session layer
+			// doesn't burn retries on errors that won't resolve for hours.
+			if (model.provider === "opencode-go" && isOpenCodeGoQuotaError(error)) {
+				output.nonRetryable = true;
+			}
 			// Some providers via OpenRouter give additional information in this field.
 			const rawMetadata = (error as any)?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -1034,6 +1044,34 @@ function parseChunkUsage(
 	};
 	calculateCost(model, usage);
 	return usage;
+}
+
+// ============================================================================
+// OpenCode Go quota error handling
+// ============================================================================
+
+/**
+ * Error types emitted by opencode-go's gateway for quota/usage-limit errors.
+ * These map to the `error.type` field on the OpenAI SDK's APIError, which is
+ * extracted from `body.error.type` in the JSON response.
+ *
+ * Matching on the structured error type is more reliable than parsing the
+ * human-readable message, and mirrors how opencode's own LLM client
+ * distinguishes QuotaExceededReason (non-retryable) from RateLimitReason.
+ */
+const OPENCODE_GO_QUOTA_ERROR_TYPES: ReadonlySet<string> = new Set([
+	"GoUsageLimitError",
+	"FreeUsageLimitError",
+	"BlackUsageLimitError",
+]);
+
+/**
+ * Detect whether an error from opencode-go is a quota/usage-limit error
+ * (as opposed to a transient rate limit) by checking the structured error type.
+ */
+function isOpenCodeGoQuotaError(error: unknown): boolean {
+	const errorType = (error as { type?: string }).type;
+	return errorType !== undefined && OPENCODE_GO_QUOTA_ERROR_TYPES.has(errorType);
 }
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {

@@ -286,6 +286,7 @@ export interface AssistantMessage {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	nonRetryable?: boolean; // When true, the session layer must not auto-retry this error (e.g. quota exceeded).
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

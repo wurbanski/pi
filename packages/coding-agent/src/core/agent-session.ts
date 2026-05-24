@@ -2429,6 +2429,9 @@ export class AgentSession {
 	private _isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
+		// Provider explicitly marked this error as non-retryable (e.g. quota exceeded).
+		if (message.nonRetryable) return false;
+
 		// Context overflow is handled by compaction, not retry
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
